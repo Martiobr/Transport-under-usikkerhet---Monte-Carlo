@@ -71,3 +71,4 @@ for route_name, total_time in simulation_results.items():
     plt.legend()
     plt.tight_layout()
     plt.show()
+    
