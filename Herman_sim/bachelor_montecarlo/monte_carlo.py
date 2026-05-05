@@ -66,63 +66,76 @@ def read_segments(excel_path: Path) -> pd.DataFrame:
 def read_stochastic_params(excel_path: Path) -> dict:
     """
     Leser Stokastiske_parametere-arket. Returnerer dict med 5 sub-tabeller.
+    Robust mot endringer i antall rader: leser til neste section-header.
     """
     raw = pd.read_excel(excel_path, sheet_name='Stokastiske_parametere',
                         header=None)
 
-    # Vi vet hvor seksjonene starter basert på hvordan vi bygde arket.
-    # Bruk søk etter section-header for robust parsing.
     def find_row(text_start):
         for i, val in enumerate(raw.iloc[:, 0]):
             if isinstance(val, str) and val.startswith(text_start):
                 return i
         return None
 
-    # Seksjon 1: CV per modus (start rad 4, headers rad 5, data rad 6+)
+    def section_nrows(start_idx):
+        """Tell datarader fra start_idx til neste section-header eller tom rad."""
+        n = 0
+        for i in range(start_idx, len(raw)):
+            val = raw.iloc[i, 0]
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                break
+            if isinstance(val, str) and (val.startswith('1.') or val.startswith('2.')
+                                          or val.startswith('3.') or val.startswith('4.')
+                                          or val.startswith('5.') or val.startswith('6.')):
+                break
+            n += 1
+        return n
+
+    # Seksjon 1: CV per modus
     s1_start = find_row('1. Transporttid')
+    n1 = section_nrows(s1_start + 2)  # +2 for section-header og kolonne-header
     cv = pd.read_excel(excel_path, sheet_name='Stokastiske_parametere',
-                       header=s1_start + 1, nrows=7,
-                       usecols='A:C')
+                       header=s1_start + 1, nrows=n1, usecols='A:C')
     cv.columns = ['Mode', 'Fordeling', 'CV']
     cv = cv.dropna(subset=['Mode']).set_index('Mode')
 
     # Seksjon 2: Terminaltid triangulær
     s2_start = find_row('2. Terminaltid')
+    n2 = section_nrows(s2_start + 2)
     tri = pd.read_excel(excel_path, sheet_name='Stokastiske_parametere',
-                        header=s2_start + 1, nrows=7,
-                        usecols='A:D')
+                        header=s2_start + 1, nrows=n2, usecols='A:D')
     tri.columns = ['Mode', 'Min', 'Mode_val', 'Max']
     tri = tri.dropna(subset=['Mode']).set_index('Mode')
 
-    # Seksjon 3: Headway
+    # Seksjon 3: Headway (har en ekstra forklaringslinje, så +3 i stedet for +2)
     s3_start = find_row('3. Ventetid')
+    n3 = section_nrows(s3_start + 3)
     hw = pd.read_excel(excel_path, sheet_name='Stokastiske_parametere',
-                       header=s3_start + 2, nrows=7,
-                       usecols='A:B')
+                       header=s3_start + 2, nrows=n3, usecols='A:B')
     hw.columns = ['Mode', 'Headway']
     hw = hw.dropna(subset=['Mode']).set_index('Mode')
 
     # Seksjon 4: Grenseforsinkelse
     s4_start = find_row('4. Grenseforsinkelse')
+    n4 = section_nrows(s4_start + 2)
     border = pd.read_excel(excel_path, sheet_name='Stokastiske_parametere',
-                           header=s4_start + 1, nrows=3,
-                           usecols='A:D')
+                           header=s4_start + 1, nrows=n4, usecols='A:D')
     border.columns = ['Grense', 'Min', 'Mode', 'Max']
     border = border.dropna(subset=['Grense']).set_index('Grense')
 
-    # Seksjon 5: Disrupsjon
+    # Seksjon 5: Disrupsjon (har forklaringslinje, +3)
     s5_start = find_row('5. Disrupsjons')
+    n5 = section_nrows(s5_start + 3)
     disrupt = pd.read_excel(excel_path, sheet_name='Stokastiske_parametere',
-                            header=s5_start + 2, nrows=7,
-                            usecols='A:E')
+                            header=s5_start + 2, nrows=n5, usecols='A:E')
     disrupt.columns = ['Mode', 'P', 'Min', 'Mode_val', 'Max']
     disrupt = disrupt.dropna(subset=['Mode']).set_index('Mode')
 
     # Seksjon 6: MC-innstillinger
     s6_start = find_row('6. Monte Carlo')
+    n6 = section_nrows(s6_start + 2)
     mc = pd.read_excel(excel_path, sheet_name='Stokastiske_parametere',
-                       header=s6_start + 1, nrows=3,
-                       usecols='A:B')
+                       header=s6_start + 1, nrows=n6, usecols='A:B')
     mc.columns = ['Parameter', 'Verdi']
     mc = mc.dropna(subset=['Parameter']).set_index('Parameter')['Verdi']
 
@@ -158,9 +171,16 @@ def simulate_segment_time(segment_row, params, rng, n, include_disrupt=True):
     """
     mode = segment_row['Mode']
 
+    # Normaliser jernbane-varianter til "Rail" for parameter-oppslag.
+    # Dette lar Ruter-arket beholde rail1/rail2/rail3-betegnelser
+    # mens Stokastiske_parametere kan ha bare én "Rail"-rad.
+    mode_lookup = 'Rail' if mode.lower().startswith('rail') else mode
+
     # ---- Transporttid: lognormal med samme mean som deterministisk verdi ----
-    t_mean = float(segment_row['Transporttid_t'])
-    cv = float(params['cv'].loc[mode, 'CV']) if mode in params['cv'].index else 0.10
+    # Hvis Excel-formel ikke har blitt beregnet (NaN), beregn selv:
+    t_mean = float(segment_row['Transporttid_t']) if pd.notna(segment_row['Transporttid_t']) else \
+             float(segment_row['Distanse_km']) / float(segment_row['Hastighet_kmt'])
+    cv = float(params['cv'].loc[mode_lookup, 'CV']) if mode_lookup in params['cv'].index else 0.10
     if t_mean > 0 and cv > 0:
         # lognormal: hvis X = exp(mu + sigma*Z), så E[X] = exp(mu + sigma^2/2)
         # CV = sqrt(exp(sigma^2) - 1)  =>  sigma^2 = ln(1 + CV^2)
@@ -171,16 +191,16 @@ def simulate_segment_time(segment_row, params, rng, n, include_disrupt=True):
         t_transport = np.full(n, t_mean)
 
     # ---- Terminaltid: triangulær ----
-    if mode in params['terminal_tri'].index:
-        tri = params['terminal_tri'].loc[mode]
+    if mode_lookup in params['terminal_tri'].index:
+        tri = params['terminal_tri'].loc[mode_lookup]
         t_terminal = rng.triangular(left=tri['Min'], mode=tri['Mode_val'],
                                     right=tri['Max'], size=n)
     else:
         t_terminal = np.full(n, float(segment_row['Terminaltid_t']))
 
     # ---- Ventetid: uniform[0, headway] ----
-    if mode in params['headway'].index:
-        hw = float(params['headway'].loc[mode, 'Headway'])
+    if mode_lookup in params['headway'].index:
+        hw = float(params['headway'].loc[mode_lookup, 'Headway'])
         t_wait = rng.uniform(0, hw, size=n) if hw > 0 else np.zeros(n)
     else:
         t_wait = np.full(n, float(segment_row['Ventetid_t']))
@@ -199,8 +219,8 @@ def simulate_segment_time(segment_row, params, rng, n, include_disrupt=True):
         t_border = np.zeros(n)
 
     # ---- Disrupsjon: P * forsinkelse ----
-    if include_disrupt and mode in params['disrupt'].index:
-        d = params['disrupt'].loc[mode]
+    if include_disrupt and mode_lookup in params['disrupt'].index:
+        d = params['disrupt'].loc[mode_lookup]
         hits = rng.uniform(0, 1, size=n) < d['P']
         delays = rng.triangular(d['Min'], d['Mode_val'], d['Max'], size=n)
         t_disrupt = hits * delays
@@ -234,7 +254,7 @@ def simulate_route(route_id, segments_df, params, costs, rng, n,
         dist = seg['Distanse_km']
 
         if mode in ('Sjø', 'Sjø_havgaaende'):
-            direct += costs['Sjø_fast_RoRo']
+            direct += dist * costs['Sjø_kostnad_per_km']
         elif mode == 'Truck':
             direct += dist * costs['Vei_kostnad_per_tonn_km'] * load_tonn
         elif mode.lower().startswith('rail'):
@@ -387,7 +407,7 @@ def plot_results(results, out_dir=Path('.')):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--excel', default='model_mc_ready.xlsx',
+    parser.add_argument('--excel', default='model_mc_ready_2.xlsx',
                         help='Path til Excel-modellen')
     parser.add_argument('--n', type=int, default=None,
                         help='Antall iterasjoner (overstyrer Excel)')
