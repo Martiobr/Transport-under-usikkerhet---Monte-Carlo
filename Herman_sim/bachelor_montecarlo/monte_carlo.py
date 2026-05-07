@@ -3,9 +3,13 @@ monte_carlo.py
 ==============
 Monte Carlo-simulering av multimodale transportruter Karmøy -> Beograd.
 
-Leser inputs direkte fra Excel-modellen (model_mc_ready.xlsx) og simulerer
+Leser inputs direkte fra Excel-modellen (model_mc_ready_2.xlsx) og simulerer
 ledetid + generaliserte kostnader (GC) for hver rute under operasjonell
 usikkerhet.
+
+GC-formel:
+    GC = C_direkte + C_terminal + alpha * E[t] + beta * sigma(t)
+    der alpha = VFTTS, beta = RR * alpha (Halse et al. 2019)
 
 Bruk:
     python monte_carlo.py                       # standard Excel-fil
@@ -22,6 +26,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
+
 
 # ----------------------------------------------------------------------------
 # 1. INNLESING FRA EXCEL
@@ -34,9 +40,6 @@ def read_segments(excel_path: Path) -> pd.DataFrame:
     """
     df = pd.read_excel(excel_path, sheet_name='Ruter', header=None)
 
-    # Finn header-rader (de som har 'Segment' i kolonne 2 / index 2)
-    # Originale headers: rad 0, 9, 20, 30, 38 (0-indeksert)
-    # Alle rader med RuteID utfylt = segment-rader
     df.columns = [
         'RuteID', 'Header', 'Segment', 'Segmenttype', 'Mode',
         'Fra', 'Til', 'Distanse_km', 'Hastighet_kmt', 'Transporttid_t',
@@ -48,7 +51,6 @@ def read_segments(excel_path: Path) -> pd.DataFrame:
     df = df[df['RuteID'].astype(str).str.match(r'^R\d+$', na=False)].copy()
     df = df[pd.to_numeric(df['Segment'], errors='coerce').notna()].copy()
 
-    # Type-cast
     numeric_cols = ['Segment', 'Distanse_km', 'Hastighet_kmt', 'Transporttid_t',
                     'Terminaltid_t', 'Ventetid_t', 'Segmenttid_t',
                     'Omlastninger', 'Grenseforsinkelse_t']
@@ -66,7 +68,7 @@ def read_segments(excel_path: Path) -> pd.DataFrame:
 def read_stochastic_params(excel_path: Path) -> dict:
     """
     Leser Stokastiske_parametere-arket. Returnerer dict med 5 sub-tabeller.
-    Robust mot endringer i antall rader: leser til neste section-header.
+    Robust mot endringer i antall rader.
     """
     raw = pd.read_excel(excel_path, sheet_name='Stokastiske_parametere',
                         header=None)
@@ -93,7 +95,7 @@ def read_stochastic_params(excel_path: Path) -> dict:
 
     # Seksjon 1: CV per modus
     s1_start = find_row('1. Transporttid')
-    n1 = section_nrows(s1_start + 2)  # +2 for section-header og kolonne-header
+    n1 = section_nrows(s1_start + 2)
     cv = pd.read_excel(excel_path, sheet_name='Stokastiske_parametere',
                        header=s1_start + 1, nrows=n1, usecols='A:C')
     cv.columns = ['Mode', 'Fordeling', 'CV']
@@ -107,7 +109,7 @@ def read_stochastic_params(excel_path: Path) -> dict:
     tri.columns = ['Mode', 'Min', 'Mode_val', 'Max']
     tri = tri.dropna(subset=['Mode']).set_index('Mode')
 
-    # Seksjon 3: Headway (har en ekstra forklaringslinje, så +3 i stedet for +2)
+    # Seksjon 3: Headway
     s3_start = find_row('3. Ventetid')
     n3 = section_nrows(s3_start + 3)
     hw = pd.read_excel(excel_path, sheet_name='Stokastiske_parametere',
@@ -123,7 +125,7 @@ def read_stochastic_params(excel_path: Path) -> dict:
     border.columns = ['Grense', 'Min', 'Mode', 'Max']
     border = border.dropna(subset=['Grense']).set_index('Grense')
 
-    # Seksjon 5: Disrupsjon (har forklaringslinje, +3)
+    # Seksjon 5: Disrupsjon
     s5_start = find_row('5. Disrupsjons')
     n5 = section_nrows(s5_start + 3)
     disrupt = pd.read_excel(excel_path, sheet_name='Stokastiske_parametere',
@@ -166,14 +168,12 @@ def simulate_segment_time(segment_row, params, rng, n, include_disrupt=True):
       - Transporttid:     lognormal(mean=t_mean, CV=cv[mode])
       - Terminaltid:      triangular(min, mode, max) for mode-en
       - Ventetid:         uniform[0, headway[mode]]
-      - Grenseforsinkelse: triangular for "EU_Serbia" hvis row har grenseforsinkelse > 0
+      - Grenseforsinkelse: triangular for "EU_Serbia"/"Norge_EU"
       - Disrupsjon:       Bernoulli(P) * triangular for haleforsinkelse
     """
     mode = segment_row['Mode']
 
     # Normaliser jernbane-varianter til "Rail" for parameter-oppslag.
-    # Dette lar Ruter-arket beholde rail1/rail2/rail3-betegnelser
-    # mens Stokastiske_parametere kan ha bare én "Rail"-rad.
     mode_lookup = 'Rail' if mode.lower().startswith('rail') else mode
 
     # ---- Transporttid: lognormal med samme mean som deterministisk verdi ----
@@ -182,8 +182,6 @@ def simulate_segment_time(segment_row, params, rng, n, include_disrupt=True):
              float(segment_row['Distanse_km']) / float(segment_row['Hastighet_kmt'])
     cv = float(params['cv'].loc[mode_lookup, 'CV']) if mode_lookup in params['cv'].index else 0.10
     if t_mean > 0 and cv > 0:
-        # lognormal: hvis X = exp(mu + sigma*Z), så E[X] = exp(mu + sigma^2/2)
-        # CV = sqrt(exp(sigma^2) - 1)  =>  sigma^2 = ln(1 + CV^2)
         sigma = np.sqrt(np.log(1 + cv**2))
         mu = np.log(t_mean) - sigma**2 / 2
         t_transport = rng.lognormal(mean=mu, sigma=sigma, size=n)
@@ -205,10 +203,9 @@ def simulate_segment_time(segment_row, params, rng, n, include_disrupt=True):
     else:
         t_wait = np.full(n, float(segment_row['Ventetid_t']))
 
-    # ---- Grenseforsinkelse: triangulær (EU_Serbia hvis registrert) ----
+    # ---- Grenseforsinkelse: triangulær ----
     border_t = float(segment_row['Grenseforsinkelse_t'])
     if border_t > 0:
-        # Bruk EU_Serbia hvis > 1 time, ellers Norge_EU
         which = 'EU_Serbia' if border_t >= 1.5 else 'Norge_EU'
         if which in params['border'].index:
             b = params['border'].loc[which]
@@ -236,15 +233,13 @@ def simulate_route(route_id, segments_df, params, costs, rng, n,
     Simulerer én rute n ganger. Returnerer dict med arrays for tid og kostnader.
     """
     route_segs = segments_df[segments_df['RuteID'] == route_id]
-    n_segs = len(route_segs)
 
     # Sum segmenttider
     total_time = np.zeros(n)
     for _, seg in route_segs.iterrows():
         total_time += simulate_segment_time(seg, params, rng, n, include_disrupt)
 
-    # ---- Kostnader ----
-    # Direkte transportkostnader (deterministisk - prises ikke med variabel pris i denne modellen)
+    # ---- Kostnader (deterministiske) ----
     direct = 0.0
     terminal_cost = 0.0
     load_tonn = costs['Lastemengde_tonn']
@@ -260,14 +255,11 @@ def simulate_route(route_id, segments_df, params, costs, rng, n,
         elif mode.lower().startswith('rail'):
             direct += dist * costs['Rail_kostnad_per_tonn_km'] * load_tonn
 
-        # Terminalkostnad pr omlasting:
-        # Vi behandler enhver omlasting > 0 som "complex" hvis det involverer mode-skift,
-        # ellers "simple". Konservativt: bruk gjennomsnitt.
         n_omlast = seg['Omlastninger']
         if pd.notna(n_omlast) and n_omlast > 0:
             terminal_cost += n_omlast * costs['Terminal_complex']
 
-    # GC = direkte + terminal + alfa * E[t] + beta * sigma(t)
+    # GC = direkte + terminal + alpha * t + beta * sigma(t)
     alpha = costs['VFTTS_alfa']
     beta = costs['Reliability_ratio_RR'] * alpha
 
@@ -275,8 +267,6 @@ def simulate_route(route_id, segments_df, params, costs, rng, n,
     std_t = total_time.std()
 
     time_cost = alpha * total_time
-    # GC pr realisasjon: bruk realisert tid for tidskostnad,
-    # men beta*sigma er en aggregert kostnad pr rute (ikke pr realisasjon)
     gc_per_iter = direct + terminal_cost + time_cost
     gc_with_reliability = direct + terminal_cost + alpha * mean_t + beta * std_t
 
@@ -290,11 +280,13 @@ def simulate_route(route_id, segments_df, params, costs, rng, n,
         'std_time': std_t,
         'gc_aggregated': gc_with_reliability,
         'reliability_premium': beta * std_t,
+        'alpha': alpha,
+        'beta': beta,
     }
 
 
 # ----------------------------------------------------------------------------
-# 3. RAPPORTERING
+# 3. RAPPORTERING (TABELL OG CSV)
 # ----------------------------------------------------------------------------
 
 def print_summary(results):
@@ -325,23 +317,37 @@ def print_summary(results):
     pd.set_option('display.max_columns', 20)
     print(df.to_string())
 
-    # Eksporter til CSV for videre bruk
     df.to_csv('mc_results_summary.csv')
     print("\n→ Lagret 'mc_results_summary.csv'")
     return df
 
 
+# ----------------------------------------------------------------------------
+# 4. FIGURER
+# ----------------------------------------------------------------------------
+
 def plot_results(results, out_dir=Path('.')):
-    """Histogram av ledetid og GC pr rute, + sammenligningsplot."""
+    """Lag alle figurene og lagre dem i out_dir."""
     out_dir.mkdir(exist_ok=True)
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
 
-    # Plot 1: Ledetid-fordeling pr rute (histogrammer overlappet)
+    # ------------------------------------------------------------------
+    # FIGUR 1: Ledetid-fordeling pr rute (KDE - glattet, i DAGER)
+    # ------------------------------------------------------------------
     fig, ax = plt.subplots(figsize=(10, 6))
+    all_times_days = np.concatenate([r['time'] / 24 for r in results])
+    x_grid = np.linspace(all_times_days.min(), all_times_days.max(), 500)
     for i, r in enumerate(results):
-        ax.hist(r['time'], bins=60, alpha=0.5, label=r['route_id'],
-                color=colors[i], density=True)
-    ax.set_xlabel('Total ledetid (timer)')
+        time_days = r['time'] / 24
+        kde = gaussian_kde(time_days)
+        ax.plot(x_grid, kde(x_grid), label=r['display_name'],
+                color=colors[i], linewidth=2.5)
+        ax.fill_between(x_grid, kde(x_grid), alpha=0.15, color=colors[i])
+        # Vertikal linje på gjennomsnittet
+        mean_days = r['mean_time'] / 24
+        ax.axvline(mean_days, color=colors[i], linestyle='--',
+                   linewidth=1.5, alpha=0.7)
+    ax.set_xlabel('Total ledetid (dager)')
     ax.set_ylabel('Sannsynlighetstetthet')
     ax.set_title('Fordeling av total ledetid pr rute (Monte Carlo, N={})'
                  .format(len(results[0]['time'])))
@@ -351,11 +357,17 @@ def plot_results(results, out_dir=Path('.')):
     fig.savefig(out_dir / 'fig_ledetid_fordeling.png', dpi=150)
     plt.close(fig)
 
-    # Plot 2: GC-fordeling pr rute
+    # ------------------------------------------------------------------
+    # FIGUR 2: GC-fordeling pr rute (KDE - glattet)
+    # ------------------------------------------------------------------
     fig, ax = plt.subplots(figsize=(10, 6))
+    all_gc = np.concatenate([r['gc'] for r in results])
+    x_grid = np.linspace(all_gc.min(), all_gc.max(), 500)
     for i, r in enumerate(results):
-        ax.hist(r['gc'], bins=60, alpha=0.5, label=r['route_id'],
-                color=colors[i], density=True)
+        kde = gaussian_kde(r['gc'])
+        ax.plot(x_grid, kde(x_grid), label=r['display_name'],
+                color=colors[i], linewidth=2.5)
+        ax.fill_between(x_grid, kde(x_grid), alpha=0.15, color=colors[i])
     ax.set_xlabel('Generaliserte kostnader GC (kr)')
     ax.set_ylabel('Sannsynlighetstetthet')
     ax.set_title('Fordeling av GC pr rute')
@@ -365,31 +377,37 @@ def plot_results(results, out_dir=Path('.')):
     fig.savefig(out_dir / 'fig_gc_fordeling.png', dpi=150)
     plt.close(fig)
 
-    # Plot 3: Boxplot ledetid
-    fig, ax = plt.subplots(figsize=(9, 6))
-    data = [r['time'] for r in results]
-    labels = [r['route_id'] for r in results]
-    bp = ax.boxplot(data, tick_labels=labels, patch_artist=True,
+    # ------------------------------------------------------------------
+    # FIGUR 3: Boxplot av ledetid (i DAGER for slide 15)
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(10, 6))
+    data_days = [r['time'] / 24 for r in results]  # konverter timer til dager
+    labels = [r['display_name'] for r in results]
+    bp = ax.boxplot(data_days, tick_labels=labels, patch_artist=True,
                     showfliers=True, whis=(5, 95))
     for patch, color in zip(bp['boxes'], colors):
         patch.set_facecolor(color)
         patch.set_alpha(0.6)
-    ax.set_ylabel('Total ledetid (timer)')
+    ax.set_ylabel('Total ledetid (dager)')
     ax.set_title('Sammenligning av ledetid (boks: Q1-Q3, whiskers: P5-P95)')
     ax.grid(alpha=0.3, axis='y')
+    ax.tick_params(axis='x', rotation=15)
     plt.tight_layout()
     fig.savefig(out_dir / 'fig_ledetid_boxplot.png', dpi=150)
     plt.close(fig)
 
-    # Plot 4: Mean GC vs std GC scatter (risk-return-aktig plot)
-    fig, ax = plt.subplots(figsize=(8, 6))
+    # ------------------------------------------------------------------
+    # FIGUR 4: Risk-return scatter (E[GC] vs σ(GC))
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(9, 6))
     for i, r in enumerate(results):
         ax.scatter(r['gc'].mean(), r['gc'].std(), s=200, color=colors[i],
-                   label=r['route_id'], edgecolor='black', zorder=3)
-        ax.annotate(r['route_id'],
+                   label=r['display_name'], edgecolor='black', zorder=3)
+        short_label = r['display_name'].split(': ')[1] if ': ' in r['display_name'] else r['display_name']
+        ax.annotate(short_label,
                     (r['gc'].mean(), r['gc'].std()),
-                    xytext=(5, 5), textcoords='offset points',
-                    fontsize=11, fontweight='bold')
+                    xytext=(8, 5), textcoords='offset points',
+                    fontsize=10, fontweight='bold')
     ax.set_xlabel('Forventet GC (kr)')
     ax.set_ylabel('Standardavvik GC (kr)')
     ax.set_title('Trade-off: forventet kostnad vs. variasjon')
@@ -398,11 +416,118 @@ def plot_results(results, out_dir=Path('.')):
     fig.savefig(out_dir / 'fig_gc_risk_return.png', dpi=150)
     plt.close(fig)
 
-    print(f"→ Lagret 4 figurer i {out_dir.resolve()}")
+    # ------------------------------------------------------------------
+    # FIGUR 4b: Risk-return scatter for LEDETID (E[t] vs σ(t)) — i dager
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(9, 6))
+    for i, r in enumerate(results):
+        mean_days = r['mean_time'] / 24
+        std_days = r['std_time'] / 24
+        ax.scatter(mean_days, std_days, s=200, color=colors[i],
+                   label=r['display_name'], edgecolor='black', zorder=3)
+        short_label = r['display_name'].split(': ')[1] if ': ' in r['display_name'] else r['display_name']
+        ax.annotate(short_label,
+                    (mean_days, std_days),
+                    xytext=(8, 5), textcoords='offset points',
+                    fontsize=10, fontweight='bold')
+    ax.set_xlabel('Forventet ledetid (dager)')
+    ax.set_ylabel('Standardavvik ledetid (dager)')
+    ax.set_title('Trade-off: forventet ledetid vs. variasjon')
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(out_dir / 'fig_ledetid_risk_return.png', dpi=150)
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # FIGUR 5: Enkel bar - bare forventet GC pr rute
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(10, 6))
+    route_names = [r['display_name'] for r in results]
+    mean_gcs = [r['gc'].mean() for r in results]
+    bars = ax.bar(route_names, mean_gcs, color=colors, edgecolor='black')
+    for bar, val in zip(bars, mean_gcs):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
+                f'{val:,.0f} kr',
+                ha='center', va='bottom', fontsize=10, fontweight='bold')
+    ax.set_ylabel('Forventet GC (kr)')
+    ax.set_title('Forventet generaliserte kostnader pr rute')
+    ax.grid(alpha=0.3, axis='y')
+    ax.set_ylim(bottom=min(mean_gcs) * 0.95, top=max(mean_gcs) * 1.05)
+    ax.tick_params(axis='x', rotation=15)
+    plt.tight_layout()
+    fig.savefig(out_dir / 'fig_gc_mean.png', dpi=150)
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # FIGUR 6: Stacked bar - GC brutt ned i komponenter (UTEN pålitelighet)
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(10, 6))
+    direct_costs = [r['direct_cost'] for r in results]
+    terminal_costs = [r['terminal_cost'] for r in results]
+    time_costs = [r['alpha'] * r['mean_time'] for r in results]
+
+    ax.bar(route_names, direct_costs, label='Direkte transport',
+           color='#4472C4', edgecolor='black')
+    bottom = list(direct_costs)
+    ax.bar(route_names, terminal_costs, bottom=bottom,
+           label='Terminalkostnad', color='#ED7D31', edgecolor='black')
+    bottom = [b + t for b, t in zip(bottom, terminal_costs)]
+    ax.bar(route_names, time_costs, bottom=bottom,
+           label='Tidskostnad (α·E[t])', color='#A5A5A5', edgecolor='black')
+
+    totals = [d + t + ti for d, t, ti in zip(direct_costs, terminal_costs, time_costs)]
+    for i, total in enumerate(totals):
+        ax.text(i, total, f'{total:,.0f}',
+                ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+    ax.set_ylabel('Generaliserte kostnader (kr)')
+    ax.set_title('GC pr rute — tradisjonell (uten pålitelighetspremie)')
+    ax.legend(loc='lower right')
+    ax.grid(alpha=0.3, axis='y')
+    ax.tick_params(axis='x', rotation=15)
+    plt.tight_layout()
+    fig.savefig(out_dir / 'fig_gc_stacked_uten_palitelighet.png', dpi=150)
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # FIGUR 7: Stacked bar - GC brutt ned i komponenter (MED pålitelighet)
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(10, 6))
+    reliability_costs = [r['reliability_premium'] for r in results]
+
+    ax.bar(route_names, direct_costs, label='Direkte transport',
+           color='#4472C4', edgecolor='black')
+    bottom = list(direct_costs)
+    ax.bar(route_names, terminal_costs, bottom=bottom,
+           label='Terminalkostnad', color='#ED7D31', edgecolor='black')
+    bottom = [b + t for b, t in zip(bottom, terminal_costs)]
+    ax.bar(route_names, time_costs, bottom=bottom,
+           label='Tidskostnad (α·E[t])', color='#A5A5A5', edgecolor='black')
+    bottom = [b + t for b, t in zip(bottom, time_costs)]
+    ax.bar(route_names, reliability_costs, bottom=bottom,
+           label='Pålitelighetspremie (β·σ(t))', color='#FFC000',
+           edgecolor='black')
+
+    totals = [d + t + ti + rl for d, t, ti, rl in
+              zip(direct_costs, terminal_costs, time_costs, reliability_costs)]
+    for i, total in enumerate(totals):
+        ax.text(i, total, f'{total:,.0f}',
+                ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+    ax.set_ylabel('Generaliserte kostnader (kr)')
+    ax.set_title('GC pr rute — utvidet (med pålitelighetspremie)')
+    ax.legend(loc='lower right')
+    ax.grid(alpha=0.3, axis='y')
+    ax.tick_params(axis='x', rotation=15)
+    plt.tight_layout()
+    fig.savefig(out_dir / 'fig_gc_stacked_med_palitelighet.png', dpi=150)
+    plt.close(fig)
+
+    print(f"→ Lagret 8 figurer i {out_dir.resolve()}")
 
 
 # ----------------------------------------------------------------------------
-# 4. MAIN
+# 5. MAIN
 # ----------------------------------------------------------------------------
 
 def main():
@@ -438,14 +563,24 @@ def main():
     print(f"  Antall segmenter totalt: {len(segments)}")
     print(f"  N = {n:,}, seed = {seed}, disrupsjoner = {include_disrupt}")
 
+    # Navne-mapping for figurer (R-koden brukes fortsatt internt og i tabell)
+    route_labels = {
+        'R1': 'R1: Rostock',
+        'R2': 'R2: Hamburg',
+        'R3': 'R3: Rotterdam-München',
+        'R4': 'R4: Rotterdam-Wien',
+        'R5': 'R5: Bar (sjø)',
+    }
+
     rng = np.random.default_rng(seed)
     results = []
     for route_id in sorted(segments['RuteID'].unique()):
         res = simulate_route(route_id, segments, params, costs, rng, n,
                              include_disrupt=include_disrupt)
+        res['display_name'] = route_labels.get(route_id, route_id)
         results.append(res)
 
-    summary = print_summary(results)
+    print_summary(results)
     plot_results(results, Path(args.out))
 
     print("\nFerdig.")
