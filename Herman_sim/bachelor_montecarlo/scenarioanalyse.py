@@ -3,7 +3,7 @@ Scenarioanalyse og følsomhetsanalyse for bachelor-modellen.
 Bygger på monte_carlo_v6.py — importerer alle nødvendige funksjoner.
 
 Kjøres etter at hovedanalysen er kjørt:
-    python3 scenarioanalyse.py --excel model_v6.xlsx
+    python3 scenarioanalyse.py --excel model_mc_ready_6.xlsx
 """
 import argparse
 from pathlib import Path
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from monte_carlo_v6 import (
+from monte_carlo import (
     read_segments, read_stochastic_params, read_cost_params,
     simulate_route, simulate_segment_time
 )
@@ -157,30 +157,30 @@ def plot_breakeven(rates, speeds_knots, gc_r5, gc_others, out_dir=Path('.')):
                      'R4': '#d62728', 'R6': '#8c564b'}
     for rt, gc in gc_others.items():
         ax.axhline(gc / 1000, color=colors_others.get(rt, 'gray'),
-                   linestyle=':', alpha=0.7, label=f'{rt}: {gc/1000:.0f}k kr')
-    
+                   linestyle='--', linewidth=2.2, alpha=0.92, label=f'{rt}: {gc/1000:.0f}k kr')
+
     ax.axvline(7, color='gray', linestyle=':', alpha=0.5)
     ax.text(7.1, ax.get_ylim()[1] * 0.95, 'Basis: 7 kr/km',
             fontsize=9, color='gray')
-    
+
     ax.set_xlabel('Sjøfraktrate (kr/km)')
     ax.set_ylabel('E[GC] (1000 kr)')
     ax.set_title(f'R5 GC vs sjøfraktrate (ved 18 knop)')
     ax.legend(loc='best', fontsize=9, framealpha=0.9)
     ax.grid(True, alpha=0.3)
-    
+
     # Plot 2: GC vs hastighet ved 7 kr/km (nominell rate)
     nominal_rate_idx = np.argmin(np.abs(rates - 7))
     gc_vs_speed = gc_r5[:, nominal_rate_idx]
-    
+
     ax = axes[1]
     ax.plot(speeds_knots, gc_vs_speed / 1000, 'b-', linewidth=2.5,
             label='R5 (Bar-ruten)')
-    
+
     for rt, gc in gc_others.items():
         ax.axhline(gc / 1000, color=colors_others.get(rt, 'gray'),
-                   linestyle=':', alpha=0.7, label=f'{rt}: {gc/1000:.0f}k kr')
-    
+                   linestyle='--', linewidth=2.2, alpha=0.92, label=f'{rt}: {gc/1000:.0f}k kr')
+
     ax.axvline(18, color='gray', linestyle=':', alpha=0.5)
     ax.text(18.1, ax.get_ylim()[1] * 0.95, 'Basis: 18 knop',
             fontsize=9, color='gray')
@@ -218,8 +218,9 @@ def blocktrain_scenario(excel_path, n_mc=10000, seed=42):
     params = read_stochastic_params(excel_path)
     costs = read_cost_params(excel_path)
     
-    results = {'basis': {}, 'tolkning3': {}, 'tolkning1': {}}
-    
+    results = {'basis': {}, 'tolkning3': {}, 'tolkning1': {}, 'alle_basis': {}}
+
+    all_route_ids = sorted(segments['RuteID'].unique())
     target_routes = ['R1', 'R3']
     
     # ----- Basis -----
@@ -241,7 +242,7 @@ def blocktrain_scenario(excel_path, n_mc=10000, seed=42):
                 'Grenseforsinkelse_t', 'Omlastninger']:
         segs_t3[col] = segs_t3[col].astype(float)
     params_t3 = {k: v.copy() if hasattr(v, 'copy') else v for k, v in params.items()}
-    
+     
     # R1: Fjern Bratislava-overføring (segment 3 = truck)
     #     Headway alle rail 24->12 t
     #     Mellomterminal-tid: redusert via Terminaltid_t-kol (kan settes lavt)
@@ -318,6 +319,16 @@ def blocktrain_scenario(excel_path, n_mc=10000, seed=42):
               f"E[t] = {res['mean_time']/24:.1f} d, "
               f"σ(t) = {res['std_time']:.1f} t")
     
+    # ----- Alle ruter ved basis (for sammenligning i figur) -----
+    print("\n--- Basis for alle ruter (kontekst) ---")
+    for rt in all_route_ids:
+        rng = np.random.default_rng(seed)
+        res = simulate_route(rt, segments, params, costs, rng, n_mc,
+                             include_disrupt=False)
+        results['alle_basis'][rt] = res
+        print(f"  {rt}: E[GC] = {res['gc'].mean():,.0f} kr, "
+              f"E[t] = {res['mean_time']/24:.1f} d")
+
     return results
 
 
@@ -400,6 +411,341 @@ def plot_blocktrain(results, out_dir=Path('.')):
     print(f"→ Lagret 'fig_blocktrain_scenario.png'")
 
 
+def plot_blocktrain_ledetid(results, out_dir=Path('.')):
+    """
+    Grouped bar chart: E[t] i dager for R1 og R3 på tvers av tre scenarier.
+    Feilstolper viser ±1 std. Prosentvis endring annoteres over.
+    """
+    out_dir = Path(out_dir)
+    routes = list(results['basis'].keys())
+    scenarios    = ['basis',      'tolkning3',          'tolkning1']
+    sc_labels    = ['Basis (nå)', 'Block-train (hoved)', 'Halv ventetid (robust)']
+    sc_colors    = ['#d4aaee',    '#2171b5',             '#6baed6']
+
+    n_routes = len(routes)
+    x = np.arange(n_routes)
+    width = 0.27
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+
+    for i, (sc, label, color) in enumerate(zip(scenarios, sc_labels, sc_colors)):
+        offset = (i - 1) * width
+        mean_d = np.array([results[sc][rt]['mean_time'] / 24 for rt in routes])
+        std_d  = np.array([results[sc][rt]['std_time']  / 24 for rt in routes])
+        ax.bar(x + offset, mean_d, width, label=label,
+               color=color, edgecolor='black', linewidth=0.7)
+        ax.errorbar(x + offset, mean_d, yerr=std_d,
+                    fmt='none', color='black', capsize=4, linewidth=1)
+        for j, (md, sd) in enumerate(zip(mean_d, std_d)):
+            ax.text(j + offset, md + sd + 0.25, f'{md:.1f}d',
+                    ha='center', fontsize=8.5, fontweight='bold')
+
+    # Prosentvis endring tolkning3 vs basis
+    for j, rt in enumerate(routes):
+        basis_d = results['basis'][rt]['mean_time'] / 24
+        new_d   = results['tolkning3'][rt]['mean_time'] / 24
+        std_b   = results['basis'][rt]['std_time'] / 24
+        pct = (new_d - basis_d) / basis_d * 100
+        y_ann = basis_d + std_b + 2.2
+        color_ann = '#2ca02c' if pct < 0 else '#d62728'
+        ax.annotate(f'{pct:+.0f}%', xy=(j, y_ann), ha='center',
+                    fontsize=11, color=color_ann, fontweight='bold')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(routes, fontsize=12)
+    ax.set_ylabel('Forventet ledetid (dager)', fontsize=11)
+    ax.set_title('Block-train scenario: Endring i ledetid for R1 og R3', fontsize=12)
+    ax.legend(loc='upper right', framealpha=0.95)
+    ax.grid(True, axis='y', alpha=0.3)
+    ax.set_axisbelow(True)
+    ax.set_ylim(bottom=0)
+    plt.tight_layout()
+    fig.savefig(out_dir / 'fig_blocktrain_ledetid.png', dpi=150)
+    plt.close(fig)
+    print("→ Lagret 'fig_blocktrain_ledetid.png'")
+
+
+# Delte konstanter for sammenligningsfigurene
+_ROUTE_COLORS = {
+    'R1': '#1f77b4', 'R2': '#ff7f0e', 'R3': '#2ca02c',
+    'R4': '#d62728', 'R5': '#9467bd', 'R6': '#8c564b',
+}
+_BLOCK_COLOR = '#FFD700'
+_ROUTE_NAMES = {
+    'R1': 'R1: Rostock', 'R2': 'R2: Hamburg', 'R3': 'R3: Rotterdam-München',
+    'R4': 'R4: Rotterdam-Wien', 'R5': 'R5: Bar (sjø)', 'R6': 'R6: Rotterdam-truck',
+}
+
+
+def _build_rows(results, include_routes):
+    """Bygg bar-data for de gitte rutene. Ruter i target_ids får par (basis + block-train)."""
+    alle       = results['alle_basis']
+    target_ids = set(results['basis'].keys())
+    rows = []
+    for rt in [r for r in sorted(alle.keys()) if r in include_routes]:
+        if rt in target_ids:
+            rows.append({
+                'label': f'{rt}\nbasis',
+                'gc': results['basis'][rt]['gc_aggregated'],
+                'lt': results['basis'][rt]['mean_time'] / 24,
+                'color': _ROUTE_COLORS.get(rt, '#aaaaaa'),
+                'hatch': '',
+            })
+            rows.append({
+                'label': f'{rt}\nblock-train',
+                'gc': results['tolkning3'][rt]['gc_aggregated'],
+                'lt': results['tolkning3'][rt]['mean_time'] / 24,
+                'color': _BLOCK_COLOR,
+                'hatch': '//',
+            })
+        else:
+            rows.append({
+                'label': rt,
+                'gc': alle[rt]['gc_aggregated'],
+                'lt': alle[rt]['mean_time'] / 24,
+                'color': _ROUTE_COLORS.get(rt, '#aaaaaa'),
+                'hatch': '',
+            })
+    return rows
+
+
+def _plot_comparison(rows, val_key, ylabel, title, out_path, include_routes):
+    """Render én sammenligningsfigur for enten GC eller ledetid."""
+    from matplotlib.patches import Patch
+    vals   = [r[val_key] for r in rows]
+    is_gc  = val_key == 'gc'
+    fmt_fn = (lambda v: f'{v:,.0f}') if is_gc else (lambda v: f'{v:.1f}d')
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    xs   = np.arange(len(rows))
+    bars = ax.bar(xs, vals, color=[r['color'] for r in rows],
+                  edgecolor='black', linewidth=0.8)
+    for bar, row in zip(bars, rows):
+        bar.set_hatch(row['hatch'])
+    for k, val in enumerate(vals):
+        ax.text(k, val + max(vals) * 0.012, fmt_fn(val),
+                ha='center', va='bottom', fontsize=8.5, fontweight='bold', rotation=0)
+    ax.set_xticks(xs)
+    ax.set_xticklabels([r['label'] for r in rows], fontsize=9)
+    ax.set_ylabel(ylabel, fontsize=11)
+    ax.set_title(title, fontsize=12)
+    ax.grid(True, axis='y', alpha=0.3)
+    ax.set_axisbelow(True)
+    ax.set_ylim(bottom=0, top=max(vals) * 1.25)
+
+    # Én patch per rute med riktig rutefarge + gull for block-train
+    legend_elements = [
+        Patch(facecolor=_ROUTE_COLORS[rt], label=_ROUTE_NAMES.get(rt, rt))
+        for rt in ['R1', 'R2', 'R3', 'R4', 'R5', 'R6']
+        if rt in include_routes
+    ]
+    legend_elements.append(
+        Patch(facecolor=_BLOCK_COLOR, hatch='//', edgecolor='black',
+              label='Block-train (hoved)')
+    )
+    ax.legend(handles=legend_elements, loc='upper right', framealpha=0.95, fontsize=9)
+
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"→ Lagret '{Path(out_path).name}'")
+
+
+def plot_blocktrain_vs_ruter_gc(results, out_dir=Path('.')):
+    """GC for alle ruter (R1–R6) med block-train-alternativ for R1 og R3."""
+    include = {'R1', 'R2', 'R3', 'R4', 'R5', 'R6'}
+    _plot_comparison(
+        _build_rows(results, include), 'gc',
+        'GC m/pålitelighetspremie (kr)', 'GC pr rute — alle ruter vs block-train (m/pålitelighetspremie)',
+        Path(out_dir) / 'fig_blocktrain_vs_ruter_gc.png', include,
+    )
+
+
+def plot_blocktrain_vs_ruter_ledetid(results, out_dir=Path('.')):
+    """Ledetid for alle ruter (R1–R6) med block-train-alternativ for R1 og R3."""
+    include = {'R1', 'R2', 'R3', 'R4', 'R5', 'R6'}
+    _plot_comparison(
+        _build_rows(results, include), 'lt',
+        'E[t] (dager)', 'Ledetid pr rute — alle ruter vs block-train',
+        Path(out_dir) / 'fig_blocktrain_vs_ruter_ledetid.png', include,
+    )
+
+
+def plot_blocktrain_vs_jernbane_gc(results, out_dir=Path('.')):
+    """GC for jernbaneruter R1–R4 med block-train-alternativ for R1 og R3."""
+    include = {'R1', 'R2', 'R3', 'R4'}
+    _plot_comparison(
+        _build_rows(results, include), 'gc',
+        'GC m/pålitelighetspremie (kr)', 'GC — jernbaneruter R1–R4 vs block-train (m/pålitelighetspremie)',
+        Path(out_dir) / 'fig_blocktrain_vs_jernbane_gc.png', include,
+    )
+
+
+def plot_blocktrain_vs_jernbane_ledetid(results, out_dir=Path('.')):
+    """Ledetid for jernbaneruter R1–R4 med block-train-alternativ for R1 og R3."""
+    include = {'R1', 'R2', 'R3', 'R4'}
+    _plot_comparison(
+        _build_rows(results, include), 'lt',
+        'E[t] (dager)', 'Ledetid — jernbaneruter R1–R4 vs block-train',
+        Path(out_dir) / 'fig_blocktrain_vs_jernbane_ledetid.png', include,
+    ) 
+
+
+# ==============================================================================
+# DEL 3: TRADE-OFF ANALYSE — R2, R3 BLOCK-TRAIN, R6
+# ==============================================================================
+
+def topptruter_analyse(bt_results):
+    """
+    Samler simuleringsresultater for de tre beste rutene:
+      - R2  (Hamburg, jernbane basis)
+      - R3  (Rotterdam-München, block-train tolkning 3)
+      - R6  (Rotterdam-truck, dagens løsning)
+    Returnerer liste av result-dicts med display_name satt.
+    """
+    return [
+        {**bt_results['alle_basis']['R2'],
+         'display_name': 'R2: Hamburg (jernbane)'},
+        {**bt_results['tolkning3']['R3'],
+         'display_name': 'R3: Block-train'},
+        {**bt_results['alle_basis']['R6'],
+         'display_name': 'R6: Rotterdam-truck'},
+    ]
+
+
+def plot_topptruter(top, out_dir=Path('.')):
+    """
+    Fire figurer for trade-off-analysen mellom R2, R3 block-train og R6:
+      1. KDE-fordeling av ledetid
+      2. KDE-fordeling av GC
+      3. Risk-return scatter (ledetid og GC, 2-panel)
+      4. GC-komponenter stacked bar
+    """
+    from scipy.stats import gaussian_kde
+    out_dir = Path(out_dir)
+    # R2=oransje, R3=grønn, R6=brun — samme farger som i hoveddataene
+    colors = ['#ff7f0e', '#2ca02c', '#8c564b']
+
+    # ------------------------------------------------------------------
+    # FIGUR 1: KDE-fordeling av ledetid
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(10, 6))
+    all_days = np.concatenate([r['time'] / 24 for r in top])
+    x_grid = np.linspace(all_days.min(), all_days.max(), 500)
+    for r, color in zip(top, colors):
+        days = r['time'] / 24
+        kde  = gaussian_kde(days)
+        ax.plot(x_grid, kde(x_grid), color=color, linewidth=2.5,
+                label=r['display_name'])
+        ax.fill_between(x_grid, kde(x_grid), alpha=0.12, color=color)
+        ax.axvline(days.mean(), color=color, linestyle='--',
+                   linewidth=1.5, alpha=0.8)
+        p10, p90 = np.percentile(days, [10, 90])
+        ax.axvspan(p10, p90, alpha=0.06, color=color)
+    ax.set_xlabel('Total ledetid (dager)', fontsize=11)
+    ax.set_ylabel('Sannsynlighetstetthet', fontsize=11)
+    ax.set_title('Fordeling av ledetid — R2, R3 block-train, R6', fontsize=12)
+    ax.legend(fontsize=10, framealpha=0.95)
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(out_dir / 'fig_topp3_ledetid_kde.png', dpi=150)
+    plt.close(fig)
+    print("→ Lagret 'fig_topp3_ledetid_kde.png'")
+
+    # ------------------------------------------------------------------
+    # FIGUR 2: KDE-fordeling av GC (med pålitelighetspremie)
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(10, 6))
+    # Legg til pålitelighetspremien (fast tillegg) på fordelingen
+    gc_with_rel = [r['gc'] + r['reliability_premium'] for r in top]
+    all_gc = np.concatenate(gc_with_rel)
+    x_grid = np.linspace(all_gc.min(), all_gc.max(), 500)
+    for gc_arr, r, color in zip(gc_with_rel, top, colors):
+        kde = gaussian_kde(gc_arr)
+        ax.plot(x_grid, kde(x_grid), color=color, linewidth=2.5,
+                label=r['display_name'])
+        ax.fill_between(x_grid, kde(x_grid), alpha=0.12, color=color)
+        ax.axvline(r['gc_aggregated'], color=color, linestyle='--',
+                   linewidth=1.5, alpha=0.8)
+    ax.set_xlabel('GC m/pålitelighetspremie (kr)', fontsize=11)
+    ax.set_ylabel('Sannsynlighetstetthet', fontsize=11)
+    ax.set_title('Fordeling av GC m/pålitelighetspremie — R2, R3 block-train, R6', fontsize=12)
+    ax.legend(fontsize=10, framealpha=0.95)
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(out_dir / 'fig_topp3_gc_kde.png', dpi=150)
+    plt.close(fig)
+    print("→ Lagret 'fig_topp3_gc_kde.png'")
+
+    # ------------------------------------------------------------------
+    # FIGUR 3: Risk-return scatter — 2-panel (ledetid + GC)
+    # ------------------------------------------------------------------
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6))
+
+    panels = [
+        (axes[0],
+         lambda r: r['mean_time'] / 24, lambda r: r['std_time'] / 24,
+         'E[t] (dager)', 'σ(t) (dager)', 'Ledetid: forventet vs. variasjon'),
+        (axes[1],
+         lambda r: r['gc_aggregated'], lambda r: r['gc'].std(),
+         'GC m/pålitelighetspremie (kr)', 'σ(GC) (kr)', 'GC m/pålitelighetspremie: forventet vs. variasjon'),
+    ]
+    for ax, x_fn, y_fn, xlabel, ylabel, title in panels:
+        for r, color in zip(top, colors):
+            xv, yv = x_fn(r), y_fn(r)
+            ax.scatter(xv, yv, s=220, color=color, edgecolor='black',
+                       zorder=3, label=r['display_name'])
+            ax.annotate(r['display_name'], (xv, yv), xytext=(9, 5),
+                        textcoords='offset points', fontsize=10, fontweight='bold')
+        ax.set_xlabel(xlabel, fontsize=11)
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.set_title(title, fontsize=11)
+        ax.legend(fontsize=9, framealpha=0.95)
+        ax.grid(alpha=0.3)
+
+    fig.suptitle('Risk-return analyse — R2, R3 block-train, R6', fontsize=12)
+    plt.tight_layout()
+    fig.savefig(out_dir / 'fig_topp3_risk_return.png', dpi=150)
+    plt.close(fig)
+    print("→ Lagret 'fig_topp3_risk_return.png'")
+
+    # ------------------------------------------------------------------
+    # FIGUR 4: GC-komponenter stacked bar
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(8, 6))
+    route_names = [r['display_name'] for r in top]
+    comp_colors = ['#4472C4', '#ED7D31', '#A5A5A5', '#FFC000']
+    comp_labels = ['Direkte transport', 'Terminalkostnad',
+                   'Tidskostnad (α·E[t])', 'Pålitelighetspremie (β·σ(t))']
+    layers = [
+        [r['direct_cost']            for r in top],
+        [r['terminal_cost']          for r in top],
+        [r['alpha'] * r['mean_time'] for r in top],
+        [r['reliability_premium']    for r in top],
+    ]
+    bottom = np.zeros(len(top))
+    for vals, color, label in zip(layers, comp_colors, comp_labels):
+        vals_arr = np.array(vals)
+        ax.bar(route_names, vals_arr, bottom=bottom,
+               color=color, edgecolor='black', label=label)
+        bottom += vals_arr
+    for i, r in enumerate(top):
+        total = r['gc_aggregated']
+        ax.text(i, total + bottom.max() * 0.01, f'{total:,.0f} kr',
+                ha='center', va='bottom', fontsize=10, fontweight='bold')
+    ax.set_ylabel('GC (kr)', fontsize=11)
+    ax.set_title('GC-komponenter — R2, R3 block-train, R6', fontsize=12)
+    ax.legend(loc='upper right', framealpha=0.95, fontsize=9)
+    ax.grid(alpha=0.3, axis='y')
+    ax.set_axisbelow(True)
+    ax.set_ylim(bottom=0, top=bottom.max() * 1.15)
+    ax.tick_params(axis='x', rotation=10)
+    plt.tight_layout()
+    fig.savefig(out_dir / 'fig_topp3_gc_komponenter.png', dpi=150)
+    plt.close(fig)
+    print("→ Lagret 'fig_topp3_gc_komponenter.png'")
+
+
 # ==============================================================================
 # MAIN
 # ==============================================================================
@@ -407,7 +753,7 @@ def plot_blocktrain(results, out_dir=Path('.')):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--excel', type=Path,
-                        default=Path('model_v6.xlsx'))
+                        default=Path('model_mc_ready_6.xlsx'))
     parser.add_argument('--n', type=int, default=2000,
                         help='MC-iterasjoner for break-even (lavere = raskere)')
     parser.add_argument('--n-block', type=int, default=10000,
@@ -426,7 +772,16 @@ def main():
     # ----- Block-train -----
     results_bt = blocktrain_scenario(args.excel, n_mc=args.n_block)
     plot_blocktrain(results_bt, args.out)
-    
+    plot_blocktrain_ledetid(results_bt, args.out)
+    plot_blocktrain_vs_ruter_gc(results_bt, args.out)
+    plot_blocktrain_vs_ruter_ledetid(results_bt, args.out)
+    plot_blocktrain_vs_jernbane_gc(results_bt, args.out)
+    plot_blocktrain_vs_jernbane_ledetid(results_bt, args.out)
+
+    # ----- Topp 3 trade-off -----
+    top3 = topptruter_analyse(results_bt)
+    plot_topptruter(top3, args.out)
+
     print("\n" + "=" * 70)
     print("Scenarioanalyse ferdig.")
     print("=" * 70)
@@ -434,3 +789,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+  
