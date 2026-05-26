@@ -3,7 +3,7 @@ Scenarioanalyse og følsomhetsanalyse for bachelor-modellen.
 Bygger på monte_carlo_v6.py — importerer alle nødvendige funksjoner.
 
 Kjøres etter at hovedanalysen er kjørt:
-    python3 scenarioanalyse.py --excel model_mc_ready_6.xlsx
+    python3 scenarioanalyse.py --excel transportmodell.xlsx
 """
 import argparse
 from pathlib import Path
@@ -753,7 +753,7 @@ def plot_topptruter(top, out_dir=Path('.')):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--excel', type=Path,
-                        default=Path('model_mc_ready_6.xlsx'))
+                        default=Path('transportmodell.xlsx'))
     parser.add_argument('--n', type=int, default=2000,
                         help='MC-iterasjoner for break-even (lavere = raskere)')
     parser.add_argument('--n-block', type=int, default=10000,

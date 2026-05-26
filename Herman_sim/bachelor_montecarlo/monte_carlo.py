@@ -3,7 +3,7 @@ monte_carlo.py
 ==============
 Monte Carlo-simulering av multimodale transportruter Karmøy -> Beograd.
  
-Leser inputs direkte fra Excel-modellen (model_mc_ready_6.xlsx) og simulerer
+Leser inputs direkte fra Excel-modellen (transportmodell.xlsx) og simulerer
 ledetid + generaliserte kostnader (GC) for hver rute under operasjonell
 usikkerhet.
  
@@ -660,7 +660,7 @@ def plot_results(results, out_dir=Path('.')):
  
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--excel', default='model_mc_ready_6.xlsx',
+    parser.add_argument('--excel', default='transportmodell.xlsx',
                         help='Path til Excel-modellen')
     parser.add_argument('--n', type=int, default=None,
                         help='Antall iterasjoner (overstyrer Excel)')

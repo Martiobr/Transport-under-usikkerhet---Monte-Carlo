@@ -6,8 +6,8 @@ Genererer tornado-diagram med endring i E[GC] (inkl. pålitelighetspremie)
 for alle 6 ruter (R1–R6, ingen block-train-versjoner).
 
 Kjøring:
-    python tornado_analyse.py                        # standard Excel-fil
-    python tornado_analyse.py --excel min_fil.xlsx   # annen fil
+    python tornado_analyse.py                        # standard: transportmodell.xlsx
+    python tornado_analyse.py --excel transportmodell.xlsx   # annen fil
     python tornado_analyse.py --n 5000               # færre iterasjoner
 """
 
@@ -273,7 +273,7 @@ def verify_results(df):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--excel', type=Path, default=Path('model_mc_ready_6.xlsx'))
+    parser.add_argument('--excel', type=Path, default=Path('transportmodell.xlsx'))
     parser.add_argument('--n', type=int, default=N_MC,
                         help='Antall MC-iterasjoner (lavere = raskere)')
     parser.add_argument('--out', type=Path, default=Path('.'))
