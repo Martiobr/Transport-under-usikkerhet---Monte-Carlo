@@ -490,8 +490,7 @@ def plot_results(results, out_dir=Path('.')):
     for i, r in enumerate(results):
         ax.scatter(r['gc'].mean(), r['gc'].std(), s=200, color=colors[i],
                    label=r['display_name'], edgecolor='black', zorder=3)
-        short_label = r['display_name'].split(': ')[1] if ': ' in r['display_name'] else r['display_name']
-        ax.annotate(short_label,
+        ax.annotate(r['display_name'],
                     (r['gc'].mean(), r['gc'].std()),
                     xytext=(8, 5), textcoords='offset points',
                     fontsize=10, fontweight='bold')
@@ -512,8 +511,7 @@ def plot_results(results, out_dir=Path('.')):
         std_days = r['std_time'] / 24
         ax.scatter(mean_days, std_days, s=200, color=colors[i],
                    label=r['display_name'], edgecolor='black', zorder=3)
-        short_label = r['display_name'].split(': ')[1] if ': ' in r['display_name'] else r['display_name']
-        ax.annotate(short_label,
+        ax.annotate(r['display_name'],
                     (mean_days, std_days),
                     xytext=(8, 5), textcoords='offset points',
                     fontsize=10, fontweight='bold')
@@ -539,7 +537,7 @@ def plot_results(results, out_dir=Path('.')):
     ax.set_ylabel('Forventet GC (kr)')
     ax.set_title('Forventet generaliserte kostnader pr rute')
     ax.grid(alpha=0.3, axis='y')
-    ax.set_ylim(bottom=min(mean_gcs) * 0.95, top=max(mean_gcs) * 1.05)
+    ax.set_ylim(bottom=0, top=160000)
     ax.tick_params(axis='x', rotation=15)
     plt.tight_layout()
     fig.savefig(out_dir / 'fig_gc_mean.png', dpi=150)
@@ -608,7 +606,7 @@ def plot_results(results, out_dir=Path('.')):
     ax.tick_params(axis='x', rotation=15)
     plt.tight_layout()
     fig.savefig(out_dir / 'fig_gc_stacked_med_palitelighet.png', dpi=150)
-    plt.close(fig) 
+    plt.close(fig)   
  
     # ------------------------------------------------------------------
     # FIGUR 8: Komponent-dekomponering av forventet ledetid pr rute
@@ -625,11 +623,11 @@ def plot_results(results, out_dir=Path('.')):
     disrupt_h    = [r['components']['disrupsjon'] for r in results]
 
     layers = [
-        ('Transport',       transport_h, '#4472C4'),
-        ('Terminal',        terminal_h,  '#ED7D31'),
-        ('Vent (headway)',   vent_h,      '#70AD47'),
-        ('Grense',          grense_h,    '#FF0000'),
-        ('Disrupsjon',      disrupt_h,   '#FFC000'),
+        ('Transport', transport_h, '#4472C4'),
+        ('Terminal',  terminal_h,  '#ED7D31'),
+        ('Venting',   vent_h,      '#70AD47'),
+        ('Grense',    grense_h,    '#FF0000'),
+        (None,        disrupt_h,   '#FFC000'),
     ]
     bottom = np.zeros(len(results))
     for label, vals, color in layers:
